@@ -2,7 +2,6 @@
 
 # If /cache is mounted, use that as PIO's coredir
 # otherwise use path in /config (so that PIO packages aren't downloaded on each compile)
-
 if [[ -d /cache ]]; then
     pio_cache_base=/cache/platformio
 else
