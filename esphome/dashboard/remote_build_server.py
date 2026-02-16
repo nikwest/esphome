@@ -339,7 +339,7 @@ class CompileWebSocket(tornado.websocket.WebSocketHandler):
             self._proc.proc.terminate()
 
 
-def make_app(token: str = "") -> tornado.web.Application:
+def make_remote_build_app(token: str = "") -> tornado.web.Application:
     """Create the remote build server Tornado application."""
     handler_kwargs = {"token": token}
     return tornado.web.Application(
@@ -351,6 +351,11 @@ def make_app(token: str = "") -> tornado.web.Application:
     )
 
 
+def make_app(token: str = "") -> tornado.web.Application:
+    """Backward-compatible alias for make_remote_build_app."""
+    return make_remote_build_app(token)
+
+
 def start_server(port: int = 6053, token: str = "") -> None:
     """Start the remote build server.
 
@@ -358,7 +363,7 @@ def start_server(port: int = 6053, token: str = "") -> None:
         port: TCP port to listen on.
         token: Bearer token for authentication. Empty string disables auth.
     """
-    app = make_app(token)
+    app = make_remote_build_app(token)
     app.listen(port)
     _LOGGER.info(
         "ESPHome remote build server v%s listening on port %d (auth=%s)",
