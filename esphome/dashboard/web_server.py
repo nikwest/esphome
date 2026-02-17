@@ -873,7 +873,8 @@ async def _download_firmware(
             pioenvs_dir = build_dir / ".pioenvs" / config_name
             pioenvs_dir.mkdir(parents=True, exist_ok=True)
             firmware_file = pioenvs_dir / "firmware.bin"
-        tmp_file = pioenvs_dir / "firmware.bin.tmp"
+
+        tmp_file = firmware_file.parent / f"{firmware_file.name}.tmp"
         tmp_file.write_bytes(resp.body)
         tmp_file.replace(firmware_file)
 

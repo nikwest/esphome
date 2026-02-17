@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -272,3 +273,138 @@ class TestDashboardRemoteBuildSettings:
         assert settings.remote_build_url == ""
         assert settings.remote_build_token == ""
         assert settings.remote_build_workspace == ""
+
+
+# ---------------------------------------------------------------------------
+# 4. Regression tests for remote compile/download protocol and firmware cache
+# ---------------------------------------------------------------------------
+
+
+class TestRemoteBuildRegression:
+    """Regression tests for remote build integration edge cases."""
+
+    @pytest.mark.asyncio
+    async def test_download_firmware_with_storage_firmware_path(self, tmp_path):
+        """Should use storage firmware_bin_path without requiring pioenvs_dir."""
+        handler = MagicMock()
+        body = b"\x01\x02firmware"
+
+        with (
+            patch.object(
+                web_server.tornado.httpclient,
+                "AsyncHTTPClient",
+                return_value=SimpleNamespace(
+                    fetch=AsyncMock(return_value=SimpleNamespace(body=body))
+                ),
+            ),
+            patch.object(
+                web_server.StorageJSON,
+                "load",
+                return_value=SimpleNamespace(
+                    firmware_bin_path=tmp_path / "cache" / "firmware.bin"
+                ),
+            ),
+        ):
+            result = await web_server._download_firmware(
+                handler,
+                "http://remote",
+                "/download/abc/firmware.bin",
+                "",
+                "technik.yaml",
+            )
+
+        assert result == tmp_path / "cache" / "firmware.bin"
+        assert result.read_bytes() == body
+
+    @pytest.mark.asyncio
+    async def test_download_firmware_without_storage_uses_build_dir(self, tmp_path):
+        """Should cache firmware in .esphome/build/<name>/.pioenvs/<name>/firmware.bin."""
+        handler = MagicMock()
+        body = b"\x03\x04firmware"
+
+        with (
+            patch.object(
+                web_server.tornado.httpclient,
+                "AsyncHTTPClient",
+                return_value=SimpleNamespace(
+                    fetch=AsyncMock(return_value=SimpleNamespace(body=body))
+                ),
+            ),
+            patch.object(web_server.StorageJSON, "load", return_value=None),
+            patch.object(web_server, "_resolve_config_name", return_value="tech"),
+            patch.object(web_server.settings, "config_dir", tmp_path),
+        ):
+            result = await web_server._download_firmware(
+                handler,
+                "http://remote",
+                "/download/abc/firmware.bin",
+                "",
+                "technik.yaml",
+            )
+
+        expected = tmp_path / ".esphome" / "build" / "tech" / ".pioenvs" / "tech" / "firmware.bin"
+        assert result == expected
+        assert result.read_bytes() == body
+
+    @pytest.mark.asyncio
+    async def test_remote_compile_sends_yaml_and_secrets_payload(self, tmp_path):
+        """Remote compile protocol should send YAML/secrets content, not filename."""
+
+        class FakeConn:
+            def __init__(self):
+                self.sent_messages = []
+                self._messages = iter(
+                    [
+                        json.dumps({"event": "line", "data": "ok\n"}),
+                        json.dumps(
+                            {
+                                "event": "done",
+                                "firmware_url": "/download/abc123/firmware.bin",
+                            }
+                        ),
+                    ]
+                )
+
+            def write_message(self, message):
+                self.sent_messages.append(message)
+
+            async def read_message(self):
+                return next(self._messages, None)
+
+        cfg = tmp_path / "technik.yaml"
+        cfg.write_text("esphome:\n  name: tech\n", encoding="utf-8")
+        (tmp_path / "secrets.yaml").write_text("api_key: test\n", encoding="utf-8")
+
+        fake_conn = FakeConn()
+        handler = MagicMock()
+
+        with (
+            patch.object(web_server.settings, "remote_build_url", "http://remote"),
+            patch.object(web_server.settings, "remote_build_token", "token"),
+            patch.object(web_server.settings, "rel_path", return_value=cfg),
+            patch.object(
+                web_server.tornado.httpclient,
+                "AsyncHTTPClient",
+                return_value=SimpleNamespace(
+                    fetch=AsyncMock(
+                        return_value=SimpleNamespace(
+                            body=json.dumps({"version": const.__version__}).encode()
+                        )
+                    )
+                ),
+            ),
+            patch.object(
+                web_server.tornado.websocket,
+                "websocket_connect",
+                AsyncMock(return_value=fake_conn),
+            ),
+        ):
+            firmware_path = await web_server._remote_compile(handler, "technik.yaml")
+
+        assert firmware_path == "/download/abc123/firmware.bin"
+        assert fake_conn.sent_messages, "No websocket message sent"
+        payload = json.loads(fake_conn.sent_messages[0])
+        assert payload["type"] == "spawn"
+        assert "yaml" in payload and "esphome:" in payload["yaml"]
+        assert "secrets" in payload and "api_key: test" in payload["secrets"]
+        assert "configuration" not in payload
