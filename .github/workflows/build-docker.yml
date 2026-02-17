@@ -71,6 +71,7 @@ jobs:
           build-args: |
             BUILD_VERSION=${{ github.sha }}
             BUILD_TYPE=docker
+            BUILD_OS=debian
 
       - name: Summary
         run: |
