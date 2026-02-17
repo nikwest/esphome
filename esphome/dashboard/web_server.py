@@ -793,17 +793,36 @@ def _sanitize_config_name(name: str) -> str:
 
 
 def _resolve_config_name(configuration: str) -> str:
-    """Resolve ESPHome device name from YAML (fallback to filename stem)."""
+    """Resolve ESPHome build name with robust fallbacks.
+
+    Priority:
+      1) storage JSON name (already-resolved runtime name)
+      2) YAML esphome.name (including simple ${substitution} resolution)
+      3) configuration filename stem
+    """
     fallback = _sanitize_config_name(Path(configuration).stem)
+
+    storage = StorageJSON.load(ext_storage_path(configuration))
+    if storage and storage.name:
+        return _sanitize_config_name(storage.name)
+
     try:
         config = yaml_util.load_yaml(settings.rel_path(configuration))
     except Exception:
         return fallback
 
-    if isinstance(config, dict):
-        name = config.get("esphome", {}).get("name")
-        if isinstance(name, str) and name:
-            return _sanitize_config_name(name)
+    if not isinstance(config, dict):
+        return fallback
+
+    name = config.get("esphome", {}).get("name")
+    if isinstance(name, str) and name:
+        sub_match = re.fullmatch(r"\$\{([A-Za-z0-9_]+)\}", name)
+        if sub_match and isinstance(config.get("substitutions"), dict):
+            sub_value = config["substitutions"].get(sub_match.group(1))
+            if isinstance(sub_value, str) and sub_value:
+                return _sanitize_config_name(sub_value)
+        return _sanitize_config_name(name)
+
     return fallback
 
 
