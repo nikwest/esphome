@@ -7,6 +7,7 @@ runs esphome compile, streams build logs back, and serves firmware binaries.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ import tornado.web
 import tornado.websocket
 
 from esphome import const
+from esphome.helpers import write_file_if_changed
 
 from .const import DASHBOARD_COMMAND
 
@@ -63,6 +65,21 @@ def _workspace_root() -> Path:
     if raw:
         return Path(raw)
     return DEFAULT_WORKSPACE
+
+
+def _write_text_if_changed(path: Path, content: str) -> bool:
+    """Write text file only when content changed to preserve incremental build mtimes."""
+    current = None
+    try:
+        current = path.read_text(encoding="utf-8")
+    except OSError:
+        pass
+
+    if current == content:
+        return False
+
+    write_file_if_changed(path, content)
+    return True
 
 
 class _BuildInfo:
@@ -234,11 +251,22 @@ class CompileWebSocket(tornado.websocket.WebSocketHandler):
         secrets_path = str(workspace_dir / "secrets.yaml")
 
         try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                f.write(yaml_content)
+            config_changed = _write_text_if_changed(Path(config_path), yaml_content)
+
+            secrets_changed = False
             if secrets_content:
-                with open(secrets_path, "w", encoding="utf-8") as f:
-                    f.write(secrets_content)
+                secrets_changed = _write_text_if_changed(
+                    Path(secrets_path), secrets_content
+                )
+            else:
+                with contextlib.suppress(OSError):
+                    Path(secrets_path).unlink()
+
+            if not config_changed and not secrets_changed:
+                _LOGGER.debug(
+                    "Remote build input unchanged for '%s'; reusing existing workspace files",
+                    config_name,
+                )
         except OSError as err:
             _LOGGER.error("Failed to write config files: %s", err)
             self.write_message(

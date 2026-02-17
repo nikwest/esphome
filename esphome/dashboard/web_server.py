@@ -878,6 +878,19 @@ async def _download_firmware(
         tmp_file.write_bytes(resp.body)
         tmp_file.replace(firmware_file)
 
+        storage_path = ext_storage_path(configuration)
+        storage = storage or StorageJSON.load(storage_path)
+        if storage is not None:
+            storage_changed = False
+            if storage.esphome_version != const.__version__:
+                storage.esphome_version = const.__version__
+                storage_changed = True
+            if storage.firmware_bin_path != firmware_file:
+                storage.firmware_bin_path = firmware_file
+                storage_changed = True
+            if storage_changed:
+                storage.save(storage_path)
+
         handler.write_message(
             {
                 "event": "line",

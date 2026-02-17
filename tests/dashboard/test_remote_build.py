@@ -16,7 +16,7 @@ from tornado.testing import bind_unused_port
 from tornado.websocket import websocket_connect
 
 from esphome import const
-from esphome.dashboard import web_server
+from esphome.dashboard import remote_build_server, web_server
 from esphome.dashboard.core import DASHBOARD
 from esphome.dashboard.web_server import (
     EsphomeCommandWebSocket,
@@ -408,3 +408,60 @@ class TestRemoteBuildRegression:
         assert "yaml" in payload and "esphome:" in payload["yaml"]
         assert "secrets" in payload and "api_key: test" in payload["secrets"]
         assert "configuration" not in payload
+
+    @pytest.mark.asyncio
+    async def test_download_firmware_updates_storage_version(self, tmp_path):
+        """Remote firmware download should update local storage version and firmware path."""
+        handler = MagicMock()
+        body = b"\xAA\xBBfirmware"
+        firmware_file = tmp_path / "cache" / "firmware.bin"
+        storage = SimpleNamespace(
+            firmware_bin_path=firmware_file,
+            esphome_version="old-version",
+            save=MagicMock(),
+        )
+
+        with (
+            patch.object(
+                web_server.tornado.httpclient,
+                "AsyncHTTPClient",
+                return_value=SimpleNamespace(
+                    fetch=AsyncMock(return_value=SimpleNamespace(body=body))
+                ),
+            ),
+            patch.object(web_server.StorageJSON, "load", return_value=storage),
+        ):
+            result = await web_server._download_firmware(
+                handler,
+                "http://remote",
+                "/download/abc/firmware.bin",
+                "",
+                "technik.yaml",
+            )
+
+        assert result == firmware_file
+        assert storage.esphome_version == const.__version__
+        assert storage.firmware_bin_path == firmware_file
+        storage.save.assert_called_once()
+
+
+class TestRemoteBuildWorkspaceWrites:
+    """Ensure remote build workspace files are written only when changed."""
+
+    def test_write_text_if_changed_skips_same_content(self, tmp_path):
+        target = tmp_path / "config.yaml"
+        target.write_text("same\n", encoding="utf-8")
+
+        changed = remote_build_server._write_text_if_changed(target, "same\n")
+
+        assert changed is False
+        assert target.read_text(encoding="utf-8") == "same\n"
+
+    def test_write_text_if_changed_updates_different_content(self, tmp_path):
+        target = tmp_path / "config.yaml"
+        target.write_text("old\n", encoding="utf-8")
+
+        changed = remote_build_server._write_text_if_changed(target, "new\n")
+
+        assert changed is True
+        assert target.read_text(encoding="utf-8") == "new\n"
