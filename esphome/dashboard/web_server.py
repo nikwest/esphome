@@ -843,11 +843,16 @@ async def _download_firmware(
             download_url, headers=headers, request_timeout=120
         )
 
-        config_name = _resolve_config_name(configuration)
-        build_dir = settings.config_dir / ".esphome" / "build" / config_name
-        pioenvs_dir = build_dir / ".pioenvs" / config_name
-        pioenvs_dir.mkdir(parents=True, exist_ok=True)
-        firmware_file = pioenvs_dir / "firmware.bin"
+        storage = StorageJSON.load(ext_storage_path(configuration))
+        if storage and storage.firmware_bin_path:
+            firmware_file = storage.firmware_bin_path
+            firmware_file.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            config_name = _resolve_config_name(configuration)
+            build_dir = settings.config_dir / ".esphome" / "build" / config_name
+            pioenvs_dir = build_dir / ".pioenvs" / config_name
+            pioenvs_dir.mkdir(parents=True, exist_ok=True)
+            firmware_file = pioenvs_dir / "firmware.bin"
         tmp_file = pioenvs_dir / "firmware.bin.tmp"
         tmp_file.write_bytes(resp.body)
         tmp_file.replace(firmware_file)
