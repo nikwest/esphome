@@ -220,12 +220,14 @@ class TestDashboardRemoteBuildSettings:
             {
                 "ESPHOME_REMOTE_BUILD_URL": "http://10.0.1.2:6053",
                 "ESPHOME_REMOTE_BUILD_TOKEN": "my-secret-token",
+                "ESPHOME_REMOTE_BUILD_WORKSPACE": "/config/.esphome/remote-build",
             },
         ):
             settings.parse_args(args)
 
         assert settings.remote_build_url == "http://10.0.1.2:6053"
         assert settings.remote_build_token == "my-secret-token"
+        assert settings.remote_build_workspace == "/config/.esphome/remote-build"
 
     def test_settings_from_cli_args(self):
         """Settings should prefer CLI args over env vars."""
@@ -240,12 +242,14 @@ class TestDashboardRemoteBuildSettings:
             verbose=False,
             remote_build_url="http://cli-server:6053",
             remote_build_token="cli-token",
+            remote_build_workspace="/config/custom-remote-build",
         )
 
         settings.parse_args(args)
 
         assert settings.remote_build_url == "http://cli-server:6053"
         assert settings.remote_build_token == "cli-token"
+        assert settings.remote_build_workspace == "/config/custom-remote-build"
 
     def test_settings_default_empty(self):
         """Without config, remote build settings should be empty strings."""
@@ -267,3 +271,4 @@ class TestDashboardRemoteBuildSettings:
 
         assert settings.remote_build_url == ""
         assert settings.remote_build_token == ""
+        assert settings.remote_build_workspace == ""

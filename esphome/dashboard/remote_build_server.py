@@ -10,12 +10,13 @@ import asyncio
 import json
 import logging
 import os
-import shutil
+import re
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 import tornado.ioloop
 import tornado.process
@@ -28,27 +29,56 @@ from .const import DASHBOARD_COMMAND
 
 _LOGGER = logging.getLogger(__name__)
 
-# Cleanup builds older than this (seconds)
+# Cleanup build metadata older than this (seconds)
 BUILD_TIMEOUT = 3600  # 1 hour
+
+DEFAULT_WORKSPACE = Path("/config/.esphome/remote-build")
 
 # Store active builds: build_id -> BuildInfo
 _builds: dict[str, _BuildInfo] = {}
 
 
+def _sanitize_name(name: str) -> str:
+    """Convert config names into safe folder names."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("._") or "device"
+
+
+def _extract_config_name(yaml_content: str, fallback: str) -> str:
+    """Extract esphome.name from YAML content; fall back when missing."""
+    try:
+        data = yaml.safe_load(yaml_content) or {}
+    except yaml.YAMLError:
+        return _sanitize_name(fallback)
+
+    name = data.get("esphome", {}).get("name") if isinstance(data, dict) else None
+    if isinstance(name, str) and name:
+        return _sanitize_name(name)
+
+    return _sanitize_name(fallback)
+
+
+def _workspace_root() -> Path:
+    """Return root workspace directory for persistent remote builds."""
+    raw = os.getenv("ESPHOME_REMOTE_BUILD_WORKSPACE", "").strip()
+    if raw:
+        return Path(raw)
+    return DEFAULT_WORKSPACE
+
+
 class _BuildInfo:
-    """Track a build's temporary directory and metadata."""
+    """Track a build workspace and metadata."""
 
-    __slots__ = ("temp_dir", "firmware_path", "created_at", "downloaded")
+    __slots__ = ("workspace_dir", "firmware_path", "created_at", "downloaded")
 
-    def __init__(self, temp_dir: str) -> None:
-        self.temp_dir = temp_dir
+    def __init__(self, workspace_dir: str) -> None:
+        self.workspace_dir = workspace_dir
         self.firmware_path: Path | None = None
         self.created_at = time.monotonic()
         self.downloaded = False
 
 
 def _cleanup_old_builds() -> None:
-    """Remove builds older than BUILD_TIMEOUT."""
+    """Remove stale build metadata entries."""
     now = time.monotonic()
     expired = [
         bid
@@ -56,10 +86,8 @@ def _cleanup_old_builds() -> None:
         if (now - info.created_at) > BUILD_TIMEOUT or info.downloaded
     ]
     for bid in expired:
-        info = _builds.pop(bid, None)
-        if info and os.path.exists(info.temp_dir):
-            shutil.rmtree(info.temp_dir, ignore_errors=True)
-            _LOGGER.debug("Cleaned up build %s", bid)
+        _builds.pop(bid, None)
+        _LOGGER.debug("Cleaned build metadata %s", bid)
 
 
 def _check_auth(handler: tornado.web.RequestHandler, token: str) -> bool:
@@ -194,13 +222,16 @@ class CompileWebSocket(tornado.websocket.WebSocketHandler):
         _cleanup_old_builds()
 
         build_id = secrets_mod.token_hex(16)
-        temp_dir = tempfile.mkdtemp(prefix="esphome_remote_")
-        build_info = _BuildInfo(temp_dir)
+        config_name = _extract_config_name(yaml_content, fallback=build_id)
+        workspace_dir = _workspace_root() / config_name
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        build_info = _BuildInfo(str(workspace_dir))
         _builds[build_id] = build_info
         self._build_id = build_id
 
-        config_path = os.path.join(temp_dir, "config.yaml")
-        secrets_path = os.path.join(temp_dir, "secrets.yaml")
+        config_path = str(workspace_dir / "config.yaml")
+        secrets_path = str(workspace_dir / "secrets.yaml")
 
         try:
             with open(config_path, "w", encoding="utf-8") as f:
@@ -217,7 +248,12 @@ class CompileWebSocket(tornado.websocket.WebSocketHandler):
             return
 
         command = [*DASHBOARD_COMMAND, "compile", config_path]
-        _LOGGER.info("Running remote compile: %s", " ".join(command))
+        _LOGGER.info(
+            "Running remote compile for '%s' in %s: %s",
+            config_name,
+            workspace_dir,
+            " ".join(command),
+        )
 
         # Ensure PlatformIO toolchain binaries are in PATH
         env = os.environ.copy()
@@ -293,7 +329,7 @@ class CompileWebSocket(tornado.websocket.WebSocketHandler):
             # Find firmware binary
             info = _builds.get(self._build_id)
             if info:
-                firmware = self._find_firmware(info.temp_dir)
+                firmware = self._find_firmware(info.workspace_dir)
                 if firmware:
                     info.firmware_path = firmware
                     self.write_message(
@@ -309,11 +345,11 @@ class CompileWebSocket(tornado.websocket.WebSocketHandler):
         self.close()
 
     @staticmethod
-    def _find_firmware(temp_dir: str) -> Path | None:
-        """Search for compiled firmware binary in the build directory."""
+    def _find_firmware(workspace_dir: str) -> Path | None:
+        """Search for compiled firmware binary in the workspace build directory."""
         # ESPHome puts firmware in .esphome/build/<name>/.pioenvs/<name>/firmware.bin
         # or similar paths depending on platform
-        build_dir = Path(temp_dir) / ".esphome"
+        build_dir = Path(workspace_dir) / ".esphome"
         if not build_dir.exists():
             return None
 
@@ -366,9 +402,10 @@ def start_server(port: int = 6053, token: str = "") -> None:
     app = make_remote_build_app(token)
     app.listen(port)
     _LOGGER.info(
-        "ESPHome remote build server v%s listening on port %d (auth=%s)",
+        "ESPHome remote build server v%s listening on port %d (auth=%s, workspace=%s)",
         const.__version__,
         port,
         "enabled" if token else "disabled",
+        _workspace_root(),
     )
     tornado.ioloop.IOLoop.current().start()

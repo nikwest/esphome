@@ -31,6 +31,7 @@ class DashboardSettings:
         "remote_build_token",
         "remote_build_server_enabled",
         "remote_build_server_token",
+        "remote_build_workspace",
         "dashboard_enabled",
     )
 
@@ -48,6 +49,7 @@ class DashboardSettings:
         self.remote_build_token: str = ""
         self.remote_build_server_enabled: bool = False
         self.remote_build_server_token: str = ""
+        self.remote_build_workspace: str = ""
         self.dashboard_enabled: bool = True
 
     def parse_args(self, args: Any) -> None:
@@ -88,6 +90,10 @@ class DashboardSettings:
             getattr(args, "remote_build_server_token", None)
             or os.getenv("ESPHOME_REMOTE_BUILD_SERVER_TOKEN", "")
             or self.remote_build_token
+        )
+        self.remote_build_workspace = (
+            getattr(args, "remote_build_workspace", None)
+            or os.getenv("ESPHOME_REMOTE_BUILD_WORKSPACE", "")
         )
         # Set to a sentinel file so .parent gives us the config directory.
         # Previously this was `os.path.join(self.config_dir, ".")` which worked because

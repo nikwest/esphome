@@ -1575,8 +1575,13 @@ def parse_args(argv):
         type=str,
         default="",
     )
+    parser_dashboard.add_argument(
+        "--remote-build-workspace",
+        help="Persistent workspace root for remote build server (default: /config/.esphome/remote-build).",
+        type=str,
+        default="",
+    )
 
-    
     parser_vscode = subparsers.add_parser("vscode")
     parser_vscode.add_argument("configuration", help="Your YAML configuration file.")
     parser_vscode.add_argument("--ace", action="store_true")

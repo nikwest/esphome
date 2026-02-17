@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -786,6 +787,26 @@ async def _remote_compile(
     return firmware_url
 
 
+def _sanitize_config_name(name: str) -> str:
+    """Convert config names into safe folder names."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("._") or "device"
+
+
+def _resolve_config_name(configuration: str) -> str:
+    """Resolve ESPHome device name from YAML (fallback to filename stem)."""
+    fallback = _sanitize_config_name(Path(configuration).stem)
+    try:
+        config = yaml_util.load_yaml(settings.rel_path(configuration))
+    except Exception:
+        return fallback
+
+    if isinstance(config, dict):
+        name = config.get("esphome", {}).get("name")
+        if isinstance(name, str) and name:
+            return _sanitize_config_name(name)
+    return fallback
+
+
 async def _download_firmware(
     handler: EsphomeCommandWebSocket,
     remote_url: str,
@@ -803,12 +824,14 @@ async def _download_firmware(
             download_url, headers=headers, request_timeout=120
         )
 
-        config_name = Path(configuration).stem
+        config_name = _resolve_config_name(configuration)
         build_dir = settings.config_dir / ".esphome" / "build" / config_name
         pioenvs_dir = build_dir / ".pioenvs" / config_name
         pioenvs_dir.mkdir(parents=True, exist_ok=True)
         firmware_file = pioenvs_dir / "firmware.bin"
-        firmware_file.write_bytes(resp.body)
+        tmp_file = pioenvs_dir / "firmware.bin.tmp"
+        tmp_file.write_bytes(resp.body)
+        tmp_file.replace(firmware_file)
 
         handler.write_message(
             {
@@ -1946,6 +1969,10 @@ def make_app(debug=get_bool_env(ENV_DEV)) -> tornado.web.Application:
 
     if settings.remote_build_server_enabled:
         token = settings.remote_build_server_token
+        if settings.remote_build_workspace:
+            os.environ["ESPHOME_REMOTE_BUILD_WORKSPACE"] = (
+                settings.remote_build_workspace
+            )
         handler_kwargs = {"token": token}
         handlers.extend(
             [
