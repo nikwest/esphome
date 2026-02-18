@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -148,8 +149,10 @@ class BaseHandler(tornado.web.RequestHandler):
 
 def websocket_class(cls):
     # pylint: disable=protected-access
-    if not hasattr(cls, "_message_handlers"):
-        cls._message_handlers = {}
+    # Always create a new dict for this class, copying any inherited handlers.
+    # This prevents subclasses from sharing/overwriting the parent's handlers.
+    parent_handlers = getattr(cls, "_message_handlers", {})
+    cls._message_handlers = dict(parent_handlers)
 
     for method in cls.__dict__.values():
         if hasattr(method, "_message_handler"):
@@ -471,13 +474,137 @@ class EsphomeUploadHandler(EsphomePortCommandWebSocket):
         return await self.build_device_command(["upload"], json_message)
 
 
+@websocket_class
 class EsphomeRunHandler(EsphomePortCommandWebSocket):
+    """Handler for run (compile+upload) with optional remote build support."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._remote_run_logs_pending = False
+        self._remote_run_json_message: dict[str, Any] | None = None
+
     async def build_command(self, json_message: dict[str, Any]) -> list[str]:
         """Build the command to run."""
         return await self.build_device_command(["run"], json_message)
 
+    @websocket_method("spawn")
+    async def handle_spawn(self, json_message: dict[str, Any]) -> None:
+        if not settings.remote_build_url:
+            return await super().handle_spawn(json_message)
+        if self._proc is not None:
+            return
+        self._remote_conn = None
+        self._json_message = json_message
+        self._remote_run_json_message = json_message
+        tornado.ioloop.IOLoop.current().spawn_callback(
+            self._remote_compile_and_upload
+        )
 
+    async def _remote_compile_and_upload(self) -> None:
+        """Compile remotely, download firmware, then upload locally via OTA."""
+        json_message = self._json_message
+        configuration = json_message["configuration"]
+
+        firmware_path = await _remote_compile(self, configuration)
+        if firmware_path is None:
+            return
+
+        # Download firmware for local upload
+        remote_url = settings.remote_build_url.rstrip("/")
+        token = settings.remote_build_token
+        await _download_firmware(self, remote_url, firmware_path, token, configuration)
+
+        # Start local OTA upload
+        self.write_message(
+            {"event": "line", "data": "\nStarting OTA upload...\n"}
+        )
+        self._remote_run_logs_pending = True
+        port = json_message.get("port", "OTA")
+        config_file = str(settings.rel_path(configuration))
+        command = [*DASHBOARD_COMMAND, "upload", config_file, "--device", port]
+        _LOGGER.info(
+            "Running upload command '%s'",
+            " ".join(shlex_quote(x) for x in command),
+        )
+
+        if self._use_popen:
+            self._queue = tornado.queues.Queue()
+            # pylint: disable=consider-using-with
+            self._proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                close_fds=False,
+            )
+            stdout_thread = threading.Thread(target=self._stdout_thread)
+            stdout_thread.daemon = True
+            stdout_thread.start()
+        else:
+            self._proc = tornado.process.Subprocess(
+                command,
+                stdout=tornado.process.Subprocess.STREAM,
+                stderr=subprocess.STDOUT,
+                stdin=tornado.process.Subprocess.STREAM,
+                close_fds=False,
+            )
+            self._proc.set_exit_callback(self._proc_on_exit)
+
+        tornado.ioloop.IOLoop.current().spawn_callback(self._redirect_stdout)
+
+    def _proc_on_exit(self, returncode: int) -> None:
+        """After upload success, switch to logs like normal `run` command."""
+        if self._remote_run_logs_pending and returncode == 0:
+            self._remote_run_logs_pending = False
+            tornado.ioloop.IOLoop.current().spawn_callback(
+                self._start_logs_after_upload
+            )
+            return
+        super()._proc_on_exit(returncode)
+
+    async def _start_logs_after_upload(self) -> None:
+        if self._remote_run_json_message is None or self._is_closed:
+            return
+
+        self.write_message({"event": "line", "data": "\nStarting logs...\n"})
+        command = await self.build_device_command(
+            ["logs"], self._remote_run_json_message
+        )
+        _LOGGER.info(
+            "Running logs command '%s'",
+            " ".join(shlex_quote(x) for x in command),
+        )
+
+        if self._use_popen:
+            self._queue = tornado.queues.Queue()
+            # pylint: disable=consider-using-with
+            self._proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                close_fds=False,
+            )
+            stdout_thread = threading.Thread(target=self._stdout_thread)
+            stdout_thread.daemon = True
+            stdout_thread.start()
+        else:
+            self._proc = tornado.process.Subprocess(
+                command,
+                stdout=tornado.process.Subprocess.STREAM,
+                stderr=subprocess.STDOUT,
+                stdin=tornado.process.Subprocess.STREAM,
+                close_fds=False,
+            )
+            self._proc.set_exit_callback(self._proc_on_exit)
+
+        tornado.ioloop.IOLoop.current().spawn_callback(self._redirect_stdout)
+
+
+@websocket_class
 class EsphomeCompileHandler(EsphomeCommandWebSocket):
+    """Handler for compile requests, with optional remote build support."""
+
     async def build_command(self, json_message: dict[str, Any]) -> list[str]:
         config_file = settings.rel_path(json_message["configuration"])
         command = [*DASHBOARD_COMMAND, "compile"]
@@ -485,6 +612,275 @@ class EsphomeCompileHandler(EsphomeCommandWebSocket):
             command.append("--only-generate")
         command.append(config_file)
         return command
+
+    @websocket_method("spawn")
+    async def handle_spawn(self, json_message: dict[str, Any]) -> None:
+        if not settings.remote_build_url:
+            return await super().handle_spawn(json_message)
+        if self._proc is not None:
+            return
+        tornado.ioloop.IOLoop.current().spawn_callback(
+            self._do_remote_compile, json_message
+        )
+
+    async def _do_remote_compile(self, json_message: dict[str, Any]) -> None:
+        """Compile remotely and report result."""
+        configuration = json_message["configuration"]
+        firmware_path = await _remote_compile(self, configuration)
+        if firmware_path is None:
+            return
+
+        # Download and cache firmware locally
+        remote_url = settings.remote_build_url.rstrip("/")
+        token = settings.remote_build_token
+        await _download_firmware(self, remote_url, firmware_path, token, configuration)
+        self.write_message({"event": "exit", "code": 0})
+        self.close()
+
+
+# --- Shared remote build helpers ---
+
+
+_SECRET_REF_RE = re.compile(r"!secret\s+(?:['\"])?([A-Za-z0-9_.-]+)(?:['\"])?")
+
+
+def _filter_remote_secrets(yaml_content: str, secrets_content: str) -> str:
+    """Return a reduced secrets.yaml containing only referenced !secret keys."""
+    if not secrets_content:
+        return ""
+
+    used_keys = set(_SECRET_REF_RE.findall(yaml_content))
+    if not used_keys:
+        return ""
+
+    try:
+        loaded = yaml.safe_load(secrets_content) or {}
+    except yaml.YAMLError:
+        # Keep compatibility if secrets file has unusual formatting.
+        return secrets_content
+
+    if not isinstance(loaded, dict):
+        return ""
+
+    filtered = {key: value for key, value in loaded.items() if key in used_keys}
+    if not filtered:
+        return ""
+
+    dumped = yaml.safe_dump(filtered, sort_keys=False)
+    return dumped if dumped.endswith("\n") else f"{dumped}\n"
+
+
+async def _remote_compile(
+    handler: EsphomeCommandWebSocket,
+    configuration: str,
+) -> str | None:
+    """Connect to remote build server, compile, and proxy logs.
+
+    Returns the firmware download path on success, None on failure.
+    """
+    remote_url = settings.remote_build_url.rstrip("/")
+    token = settings.remote_build_token
+    config_file = settings.rel_path(configuration)
+
+    handler.write_message(
+        {
+            "event": "line",
+            "data": f"Connecting to remote build server: {remote_url}\n",
+        }
+    )
+
+    # Version check
+    try:
+        http_client = tornado.httpclient.AsyncHTTPClient()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = await http_client.fetch(
+            f"{remote_url}/version", headers=headers, request_timeout=10
+        )
+        remote_ver = json.loads(resp.body).get("version", "")
+        local_ver = const.__version__
+        if remote_ver != local_ver:
+            if remote_ver.split(".", maxsplit=1)[0] != local_ver.split(
+                ".", maxsplit=1
+            )[0]:
+                handler.write_message(
+                    {
+                        "event": "line",
+                        "data": f"ERROR: Major version mismatch "
+                        f"(local={local_ver}, remote={remote_ver})\n",
+                    }
+                )
+                handler.write_message({"event": "exit", "code": 1})
+                return None
+            handler.write_message(
+                {
+                    "event": "line",
+                    "data": f"WARNING: Version mismatch "
+                    f"(local={local_ver}, remote={remote_ver})\n",
+                }
+            )
+    except tornado.httpclient.HTTPClientError as err:
+        if err.code == 401:
+            handler.write_message(
+                {
+                    "event": "line",
+                    "data": "ERROR: Remote build server authentication failed (check token)\n",
+                }
+            )
+        else:
+            handler.write_message(
+                {
+                    "event": "line",
+                    "data": f"ERROR: Cannot reach build server: {err}\n",
+                }
+            )
+        handler.write_message({"event": "exit", "code": 1})
+        return None
+    except Exception as err:
+        handler.write_message(
+            {"event": "line", "data": f"ERROR: Cannot reach build server: {err}\n"}
+        )
+        handler.write_message({"event": "exit", "code": 1})
+        return None
+
+    # Read config files
+    try:
+        yaml_content = config_file.read_text(encoding="utf-8")
+    except OSError as err:
+        handler.write_message(
+            {"event": "line", "data": f"ERROR: Cannot read config: {err}\n"}
+        )
+        handler.write_message({"event": "exit", "code": 1})
+        return None
+
+    secrets_content = ""
+    secrets_file = config_file.parent / "secrets.yaml"
+    if secrets_file.exists():
+        try:
+            secrets_content = secrets_file.read_text(encoding="utf-8")
+            secrets_content = _filter_remote_secrets(yaml_content, secrets_content)
+        except OSError:
+            pass
+
+    # Connect to remote build server
+    ws_url = remote_url.replace("http://", "ws://").replace("https://", "wss://")
+    compile_url = f"{ws_url}/compile"
+    if token:
+        compile_url += f"?token={token}"
+
+    try:
+        conn = await tornado.websocket.websocket_connect(
+            compile_url, connect_timeout=30
+        )
+    except Exception as err:
+        handler.write_message(
+            {
+                "event": "line",
+                "data": f"ERROR: Failed to connect to build server: {err}\n",
+            }
+        )
+        handler.write_message({"event": "exit", "code": 1})
+        return None
+
+    # Send config and start compilation
+    conn.write_message(
+        json.dumps({"type": "spawn", "yaml": yaml_content, "secrets": secrets_content})
+    )
+    handler.write_message(
+        {"event": "line", "data": "Remote compilation started...\n"}
+    )
+
+    # Proxy build logs back to the frontend
+    firmware_url = None
+    while True:
+        msg = await conn.read_message()
+        if msg is None:
+            if firmware_url is None:
+                handler.write_message(
+                    {"event": "line", "data": "ERROR: Build server disconnected\n"}
+                )
+                handler.write_message({"event": "exit", "code": 1})
+            break
+
+        try:
+            data = json.loads(msg)
+        except json.JSONDecodeError:
+            continue
+
+        event = data.get("event")
+        if event == "line":
+            handler.write_message(data)
+        elif event == "done":
+            firmware_url = data.get("firmware_url", "")
+            break
+        elif event == "exit":
+            handler.write_message(data)
+            return None
+
+    return firmware_url
+
+
+def _sanitize_config_name(name: str) -> str:
+    """Convert config names into safe folder names."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name).strip("._") or "device"
+
+
+def _resolve_config_name(configuration: str) -> str:
+    """Resolve ESPHome device name from YAML (fallback to filename stem)."""
+    fallback = _sanitize_config_name(Path(configuration).stem)
+    try:
+        config = yaml_util.load_yaml(settings.rel_path(configuration))
+    except Exception:
+        return fallback
+
+    if isinstance(config, dict):
+        name = config.get("esphome", {}).get("name")
+        if isinstance(name, str) and name:
+            return _sanitize_config_name(name)
+    return fallback
+
+
+async def _download_firmware(
+    handler: EsphomeCommandWebSocket,
+    remote_url: str,
+    firmware_path: str,
+    token: str,
+    configuration: str,
+) -> Path | None:
+    """Download compiled firmware from the remote build server."""
+    download_url = f"{remote_url}{firmware_path}"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    try:
+        http_client = tornado.httpclient.AsyncHTTPClient()
+        resp = await http_client.fetch(
+            download_url, headers=headers, request_timeout=120
+        )
+
+        config_name = _resolve_config_name(configuration)
+        build_dir = settings.config_dir / ".esphome" / "build" / config_name
+        pioenvs_dir = build_dir / ".pioenvs" / config_name
+        pioenvs_dir.mkdir(parents=True, exist_ok=True)
+        firmware_file = pioenvs_dir / "firmware.bin"
+        tmp_file = pioenvs_dir / "firmware.bin.tmp"
+        tmp_file.write_bytes(resp.body)
+        tmp_file.replace(firmware_file)
+
+        handler.write_message(
+            {
+                "event": "line",
+                "data": f"Firmware downloaded ({len(resp.body)} bytes)\n",
+            }
+        )
+        _LOGGER.info(
+            "Remote firmware cached at %s (%d bytes)", firmware_file, len(resp.body)
+        )
+        return firmware_file
+    except Exception as err:
+        _LOGGER.error("Failed to download remote firmware: %s", err)
+        handler.write_message(
+            {"event": "line", "data": f"ERROR: Failed to download firmware: {err}\n"}
+        )
+        return None
 
 
 class EsphomeValidateHandler(EsphomeCommandWebSocket):
@@ -1515,6 +1911,8 @@ def get_static_file_url(name: str) -> str:
 
 
 def make_app(debug=get_bool_env(ENV_DEV)) -> tornado.web.Application:
+    from .remote_build_server import CompileWebSocket, DownloadHandler, VersionHandler
+
     def log_function(handler: tornado.web.RequestHandler) -> None:
         if handler.get_status() < 400:
             log_method = access_log.info
@@ -1559,47 +1957,70 @@ def make_app(debug=get_bool_env(ENV_DEV)) -> tornado.web.Application:
         "xsrf_cookies": settings.using_password,
     }
     rel = settings.relative_url
-    return tornado.web.Application(
-        [
-            (f"{rel}", MainRequestHandler),
-            (f"{rel}login", LoginHandler),
-            (f"{rel}logout", LogoutHandler),
-            (f"{rel}logs", EsphomeLogsHandler),
-            (f"{rel}upload", EsphomeUploadHandler),
-            (f"{rel}run", EsphomeRunHandler),
-            (f"{rel}compile", EsphomeCompileHandler),
-            (f"{rel}validate", EsphomeValidateHandler),
-            (f"{rel}clean-mqtt", EsphomeCleanMqttHandler),
-            (f"{rel}clean-all", EsphomeCleanAllHandler),
-            (f"{rel}clean", EsphomeCleanHandler),
-            (f"{rel}vscode", EsphomeVscodeHandler),
-            (f"{rel}ace", EsphomeAceEditorHandler),
-            (f"{rel}update-all", EsphomeUpdateAllHandler),
-            (f"{rel}info", InfoRequestHandler),
-            (f"{rel}edit", EditRequestHandler),
-            (f"{rel}downloads", DownloadListRequestHandler),
-            (f"{rel}download.bin", DownloadBinaryRequestHandler),
-            (f"{rel}serial-ports", SerialPortRequestHandler),
-            (f"{rel}ping", PingRequestHandler),
-            (f"{rel}delete", ArchiveRequestHandler),
-            (f"{rel}undo-delete", UnArchiveRequestHandler),
-            (f"{rel}archive", ArchiveRequestHandler),
-            (f"{rel}unarchive", UnArchiveRequestHandler),
-            (f"{rel}wizard", WizardRequestHandler),
-            (f"{rel}static/(.*)", StaticFileHandler, {"path": get_static_path()}),
-            (f"{rel}devices", ListDevicesHandler),
-            (f"{rel}events", DashboardEventsWebSocket),
-            (f"{rel}import", ImportRequestHandler),
-            (f"{rel}secret_keys", SecretKeysRequestHandler),
-            (f"{rel}json-config", JsonConfigRequestHandler),
-            (f"{rel}rename", EsphomeRenameHandler),
-            (f"{rel}prometheus-sd", PrometheusServiceDiscoveryHandler),
-            (f"{rel}boards/([a-z0-9]+)", BoardsRequestHandler),
-            (f"{rel}version", EsphomeVersionHandler),
-            (f"{rel}ignore-device", IgnoreDeviceRequestHandler),
-        ],
-        **app_settings,
-    )
+    handlers: list[tuple[Any, ...]] = []
+
+    if settings.dashboard_enabled:
+        handlers.extend(
+            [
+                (f"{rel}", MainRequestHandler),
+                (f"{rel}login", LoginHandler),
+                (f"{rel}logout", LogoutHandler),
+                (f"{rel}logs", EsphomeLogsHandler),
+                (f"{rel}upload", EsphomeUploadHandler),
+                (f"{rel}run", EsphomeRunHandler),
+                (f"{rel}compile", EsphomeCompileHandler),
+                (f"{rel}validate", EsphomeValidateHandler),
+                (f"{rel}clean-mqtt", EsphomeCleanMqttHandler),
+                (f"{rel}clean-all", EsphomeCleanAllHandler),
+                (f"{rel}clean", EsphomeCleanHandler),
+                (f"{rel}vscode", EsphomeVscodeHandler),
+                (f"{rel}ace", EsphomeAceEditorHandler),
+                (f"{rel}update-all", EsphomeUpdateAllHandler),
+                (f"{rel}info", InfoRequestHandler),
+                (f"{rel}edit", EditRequestHandler),
+                (f"{rel}downloads", DownloadListRequestHandler),
+                (f"{rel}download.bin", DownloadBinaryRequestHandler),
+                (f"{rel}serial-ports", SerialPortRequestHandler),
+                (f"{rel}ping", PingRequestHandler),
+                (f"{rel}delete", ArchiveRequestHandler),
+                (f"{rel}undo-delete", UnArchiveRequestHandler),
+                (f"{rel}archive", ArchiveRequestHandler),
+                (f"{rel}unarchive", UnArchiveRequestHandler),
+                (f"{rel}wizard", WizardRequestHandler),
+                (f"{rel}static/(.*)", StaticFileHandler, {"path": get_static_path()}),
+                (f"{rel}devices", ListDevicesHandler),
+                (f"{rel}events", DashboardEventsWebSocket),
+                (f"{rel}import", ImportRequestHandler),
+                (f"{rel}secret_keys", SecretKeysRequestHandler),
+                (f"{rel}json-config", JsonConfigRequestHandler),
+                (f"{rel}rename", EsphomeRenameHandler),
+                (f"{rel}prometheus-sd", PrometheusServiceDiscoveryHandler),
+                (f"{rel}boards/([a-z0-9]+)", BoardsRequestHandler),
+                (f"{rel}version", EsphomeVersionHandler),
+                (f"{rel}ignore-device", IgnoreDeviceRequestHandler),
+            ]
+        )
+
+    if settings.remote_build_server_enabled:
+        token = settings.remote_build_server_token
+        if settings.remote_build_workspace:
+            os.environ["ESPHOME_REMOTE_BUILD_WORKSPACE"] = (
+                settings.remote_build_workspace
+            )
+        handler_kwargs = {"token": token}
+        handlers.extend(
+            [
+                (f"{rel}remote-build/version", VersionHandler, handler_kwargs),
+                (f"{rel}remote-build/compile", CompileWebSocket, handler_kwargs),
+                (
+                    f"{rel}remote-build/download/([a-f0-9]+)/firmware\\.bin",
+                    DownloadHandler,
+                    handler_kwargs,
+                ),
+            ]
+        )
+
+    return tornado.web.Application(handlers, **app_settings)
 
 
 def start_web_server(

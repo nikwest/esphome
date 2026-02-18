@@ -1227,7 +1227,7 @@ PRE_CONFIG_ACTIONS = {
     "vscode": command_vscode,
     "update-all": command_update_all,
     "clean-all": command_clean_all,
-}
+    }
 
 POST_CONFIG_ACTIONS = {
     "config": command_config,
@@ -1508,10 +1508,45 @@ def parse_args(argv):
         "--open-ui", help="Open the dashboard UI in a browser.", action="store_true"
     )
     parser_dashboard.add_argument(
+        "--dashboard-enabled",
+        help="Enable dashboard UI/API endpoints.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser_dashboard.add_argument(
         "--ha-addon", help=argparse.SUPPRESS, action="store_true"
     )
     parser_dashboard.add_argument(
         "--socket", help="Make the dashboard serve under a unix socket", type=str
+    )
+    parser_dashboard.add_argument(
+        "--remote-build-url",
+        help="URL of a remote build server (e.g. http://10.0.1.2:6053).",
+        type=str,
+        default="",
+    )
+    parser_dashboard.add_argument(
+        "--remote-build-token",
+        help="Bearer token for remote build server authentication.",
+        type=str,
+        default="",
+    )
+    parser_dashboard.add_argument(
+        "--remote-build-server-enabled",
+        help="Enable embedded remote build server endpoints in the dashboard.",
+        action="store_true",
+    )
+    parser_dashboard.add_argument(
+        "--remote-build-server-token",
+        help="Bearer token for embedded remote build server endpoints.",
+        type=str,
+        default="",
+    )
+    parser_dashboard.add_argument(
+        "--remote-build-workspace",
+        help="Persistent workspace root for remote build server (default: /config/.esphome/remote-build).",
+        type=str,
+        default="",
     )
 
     parser_vscode = subparsers.add_parser("vscode")
