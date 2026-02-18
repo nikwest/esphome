@@ -3,6 +3,7 @@
 A standalone Tornado WebSocket server that accepts compilation requests,
 runs esphome compile, streams build logs back, and serves firmware binaries.
 """
+# pylint: disable=abstract-method,attribute-defined-outside-init,invalid-overridden-method,broad-exception-caught
 
 from __future__ import annotations
 
@@ -14,7 +15,6 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -151,9 +151,7 @@ class DownloadHandler(tornado.web.RequestHandler):
             return
 
         self.set_header("Content-Type", "application/octet-stream")
-        self.set_header(
-            "Content-Disposition", f'attachment; filename="firmware.bin"'
-        )
+        self.set_header("Content-Disposition", 'attachment; filename="firmware.bin"')
         with open(info.firmware_path, "rb") as f:
             self.write(f.read())
         info.downloaded = True

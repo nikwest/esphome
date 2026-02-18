@@ -3,27 +3,23 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
 from tornado.httpclient import AsyncHTTPClient
 from tornado.httpserver import HTTPServer
-from tornado.ioloop import IOLoop
 from tornado.testing import bind_unused_port
 from tornado.websocket import websocket_connect
 
 from esphome import const
-from esphome.dashboard import web_server
-from esphome.dashboard.core import DASHBOARD
+from esphome.dashboard import remote_build_server, web_server
 from esphome.dashboard.web_server import (
     EsphomeCommandWebSocket,
     EsphomeCompileHandler,
     EsphomeRunHandler,
 )
-
-from .common import get_fixture_path
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +84,7 @@ class TestWebsocketClassDecorator:
 
 
 @pytest_asyncio.fixture()
-async def remote_build_server():
+async def remote_build_server_fixture():
     """Start a remote build server on a random port for testing."""
     from esphome.dashboard.remote_build_server import make_remote_build_app
 
@@ -109,10 +105,10 @@ class TestRemoteBuildServerVersion:
     """Test the /version endpoint of the remote build server."""
 
     @pytest.mark.asyncio
-    async def test_version_returns_esphome_version(self, remote_build_server):
+    async def test_version_returns_esphome_version(self, remote_build_server_fixture):
         """GET /version should return the current ESPHome version."""
-        url = f"{remote_build_server['url']}/version"
-        resp = await remote_build_server["client"].fetch(
+        url = f"{remote_build_server_fixture['url']}/version"
+        resp = await remote_build_server_fixture["client"].fetch(
             url,
             headers={"Authorization": "Bearer test-token-123"},
         )
@@ -121,23 +117,23 @@ class TestRemoteBuildServerVersion:
         assert data["version"] == const.__version__
 
     @pytest.mark.asyncio
-    async def test_version_requires_auth(self, remote_build_server):
+    async def test_version_requires_auth(self, remote_build_server_fixture):
         """GET /version without token should return 401."""
         from tornado.httpclient import HTTPClientError
 
-        url = f"{remote_build_server['url']}/version"
+        url = f"{remote_build_server_fixture['url']}/version"
         with pytest.raises(HTTPClientError) as exc_info:
-            await remote_build_server["client"].fetch(url)
+            await remote_build_server_fixture["client"].fetch(url)
         assert exc_info.value.code == 401
 
     @pytest.mark.asyncio
-    async def test_version_rejects_bad_token(self, remote_build_server):
+    async def test_version_rejects_bad_token(self, remote_build_server_fixture):
         """GET /version with wrong token should return 401."""
         from tornado.httpclient import HTTPClientError
 
-        url = f"{remote_build_server['url']}/version"
+        url = f"{remote_build_server_fixture['url']}/version"
         with pytest.raises(HTTPClientError) as exc_info:
-            await remote_build_server["client"].fetch(
+            await remote_build_server_fixture["client"].fetch(
                 url,
                 headers={"Authorization": "Bearer wrong-token"},
             )
@@ -148,18 +144,18 @@ class TestRemoteBuildServerCompile:
     """Test the /compile WebSocket endpoint."""
 
     @pytest.mark.asyncio
-    async def test_compile_websocket_connects(self, remote_build_server):
+    async def test_compile_websocket_connects(self, remote_build_server_fixture):
         """Should be able to connect to /compile with valid token."""
-        port = remote_build_server["port"]
+        port = remote_build_server_fixture["port"]
         ws_url = f"ws://127.0.0.1:{port}/compile?token=test-token-123"
         ws = await websocket_connect(ws_url)
         assert ws is not None
         ws.close()
 
     @pytest.mark.asyncio
-    async def test_compile_sends_spawn_with_yaml(self, remote_build_server):
+    async def test_compile_sends_spawn_with_yaml(self, remote_build_server_fixture):
         """Sending a spawn message with YAML should start compilation."""
-        port = remote_build_server["port"]
+        port = remote_build_server_fixture["port"]
         ws_url = f"ws://127.0.0.1:{port}/compile?token=test-token-123"
         ws = await websocket_connect(ws_url)
 
@@ -213,6 +209,7 @@ class TestDashboardRemoteBuildSettings:
             verbose=False,
             remote_build_url=None,
             remote_build_token=None,
+            remote_build_workspace=None,
         )
 
         with patch.dict(
@@ -264,6 +261,7 @@ class TestDashboardRemoteBuildSettings:
             verbose=False,
             remote_build_url=None,
             remote_build_token=None,
+            remote_build_workspace=None,
         )
 
         with patch.dict("os.environ", {}, clear=True):

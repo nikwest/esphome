@@ -699,7 +699,9 @@ async def _remote_compile(
         remote_ver = json.loads(resp.body).get("version", "")
         local_ver = const.__version__
         if remote_ver != local_ver:
-            if remote_ver.split(".")[0] != local_ver.split(".")[0]:
+            if remote_ver.split(".", maxsplit=1)[0] != local_ver.split(
+                ".", maxsplit=1
+            )[0]:
                 handler.write_message(
                     {
                         "event": "line",
