@@ -27,6 +27,12 @@ class DashboardSettings:
         "cookie_secret",
         "absolute_config_dir",
         "verbose",
+        "remote_build_url",
+        "remote_build_token",
+        "remote_build_server_enabled",
+        "remote_build_server_token",
+        "remote_build_workspace",
+        "dashboard_enabled",
     )
 
     def __init__(self) -> None:
@@ -39,10 +45,26 @@ class DashboardSettings:
         self.cookie_secret: str | None = None
         self.absolute_config_dir: Path | None = None
         self.verbose: bool = False
+        self.remote_build_url: str = ""
+        self.remote_build_token: str = ""
+        self.remote_build_server_enabled: bool = False
+        self.remote_build_server_token: str = ""
+        self.remote_build_workspace: str = ""
+        self.dashboard_enabled: bool = True
 
     def parse_args(self, args: Any) -> None:
         """Parse the arguments."""
         self.on_ha_addon: bool = args.ha_addon
+        dashboard_env = os.getenv("ESPHOME_DASHBOARD_ENABLED")
+        if dashboard_env is None:
+            self.dashboard_enabled = bool(getattr(args, "dashboard_enabled", True))
+        else:
+            self.dashboard_enabled = dashboard_env.lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
         password = args.password or os.getenv("PASSWORD") or ""
         if not self.on_ha_addon:
             self.username = args.username or os.getenv("USERNAME") or ""
@@ -52,6 +74,27 @@ class DashboardSettings:
         self.config_dir = Path(args.configuration)
         self.absolute_config_dir = self.config_dir.resolve()
         self.verbose = args.verbose
+        self.remote_build_url = (
+            getattr(args, "remote_build_url", None)
+            or os.getenv("ESPHOME_REMOTE_BUILD_URL", "")
+        )
+        self.remote_build_token = (
+            getattr(args, "remote_build_token", None)
+            or os.getenv("ESPHOME_REMOTE_BUILD_TOKEN", "")
+        )
+        self.remote_build_server_enabled = bool(
+            getattr(args, "remote_build_server_enabled", False)
+            or get_bool_env("ESPHOME_REMOTE_BUILD_SERVER_ENABLED")
+        )
+        self.remote_build_server_token = (
+            getattr(args, "remote_build_server_token", None)
+            or os.getenv("ESPHOME_REMOTE_BUILD_SERVER_TOKEN", "")
+            or self.remote_build_token
+        )
+        self.remote_build_workspace = (
+            getattr(args, "remote_build_workspace", None)
+            or os.getenv("ESPHOME_REMOTE_BUILD_WORKSPACE", "")
+        )
         # Set to a sentinel file so .parent gives us the config directory.
         # Previously this was `os.path.join(self.config_dir, ".")` which worked because
         # os.path.dirname("/config/.") returns "/config", but Path("/config/.").parent
