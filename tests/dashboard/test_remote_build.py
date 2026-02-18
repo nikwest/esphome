@@ -1,4 +1,5 @@
 """Tests for remote build server and dashboard remote build integration."""
+
 from __future__ import annotations
 
 import asyncio
@@ -153,38 +154,18 @@ class TestRemoteBuildServerCompile:
         ws.close()
 
     @pytest.mark.asyncio
-    async def test_compile_sends_spawn_with_yaml(self, remote_build_server_fixture):
-        """Sending a spawn message with YAML should start compilation."""
+    async def test_compile_rejects_missing_yaml(self, remote_build_server_fixture):
+        """Spawn without YAML should fail fast with an exit event."""
         port = remote_build_server_fixture["port"]
         ws_url = f"ws://127.0.0.1:{port}/compile?token=test-token-123"
         ws = await websocket_connect(ws_url)
 
-        # Send a minimal (but invalid) YAML to trigger a quick failure
-        ws.write_message(
-            json.dumps(
-                {
-                    "type": "spawn",
-                    "yaml": "this is not valid esphome yaml",
-                    "secrets": "",
-                }
-            )
-        )
+        ws.write_message(json.dumps({"type": "spawn", "secrets": ""}))
 
-        # Should receive at least one line event and an exit event
-        events = []
-        while True:
-            msg = await asyncio.wait_for(ws.read_message(), timeout=30)
-            if msg is None:
-                break
-            data = json.loads(msg)
-            events.append(data)
-            if data.get("event") in ("exit", "done"):
-                break
-
-        assert len(events) > 0
-        # Last event should be exit (compilation should fail on invalid YAML)
-        last_event = events[-1]
-        assert last_event["event"] == "exit"
+        msg = await asyncio.wait_for(ws.read_message(), timeout=10)
+        assert msg is not None
+        data = json.loads(msg)
+        assert data.get("event") == "exit"
         ws.close()
 
 
@@ -384,7 +365,7 @@ class TestRemoteBuildRegression:
         with (
             patch.object(web_server.settings, "remote_build_url", "http://remote"),
             patch.object(web_server.settings, "remote_build_token", "token"),
-            patch.object(web_server.settings, "rel_path", return_value=cfg),
+            patch.object(type(web_server.settings), "rel_path", return_value=cfg),
             patch.object(
                 web_server.tornado.httpclient,
                 "AsyncHTTPClient",

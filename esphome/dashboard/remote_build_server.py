@@ -77,6 +77,17 @@ class _BuildInfo:
         self.downloaded = False
 
 
+def _write_text_if_changed(path: Path, content: str) -> bool:
+    """Write content only when file differs.
+
+    Returns True when file content was changed.
+    """
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return False
+    path.write_text(content, encoding="utf-8")
+    return True
+
+
 def _cleanup_old_builds() -> None:
     """Remove stale build metadata entries."""
     now = time.monotonic()
@@ -228,15 +239,15 @@ class CompileWebSocket(tornado.websocket.WebSocketHandler):
         _builds[build_id] = build_info
         self._build_id = build_id
 
-        config_path = str(workspace_dir / "config.yaml")
-        secrets_path = str(workspace_dir / "secrets.yaml")
+        config_path = workspace_dir / "config.yaml"
+        secrets_path = workspace_dir / "secrets.yaml"
 
         try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                f.write(yaml_content)
+            _write_text_if_changed(config_path, yaml_content)
             if secrets_content:
-                with open(secrets_path, "w", encoding="utf-8") as f:
-                    f.write(secrets_content)
+                _write_text_if_changed(secrets_path, secrets_content)
+            elif secrets_path.exists():
+                secrets_path.unlink()
         except OSError as err:
             _LOGGER.error("Failed to write config files: %s", err)
             self.write_message(
@@ -245,7 +256,7 @@ class CompileWebSocket(tornado.websocket.WebSocketHandler):
             self.close()
             return
 
-        command = [*DASHBOARD_COMMAND, "compile", config_path]
+        command = [*DASHBOARD_COMMAND, "compile", str(config_path)]
         _LOGGER.info(
             "Running remote compile for '%s' in %s: %s",
             config_name,

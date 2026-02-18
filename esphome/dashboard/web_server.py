@@ -845,7 +845,7 @@ async def _download_firmware(
     firmware_path: str,
     token: str,
     configuration: str,
-) -> None:
+) -> Path | None:
     """Download compiled firmware from the remote build server."""
     download_url = f"{remote_url}{firmware_path}"
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -874,11 +874,13 @@ async def _download_firmware(
         _LOGGER.info(
             "Remote firmware cached at %s (%d bytes)", firmware_file, len(resp.body)
         )
+        return firmware_file
     except Exception as err:
         _LOGGER.error("Failed to download remote firmware: %s", err)
         handler.write_message(
             {"event": "line", "data": f"ERROR: Failed to download firmware: {err}\n"}
         )
+        return None
 
 
 class EsphomeValidateHandler(EsphomeCommandWebSocket):
