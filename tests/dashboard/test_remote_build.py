@@ -372,8 +372,13 @@ class TestRemoteBuildRegression:
                 return next(self._messages, None)
 
         cfg = tmp_path / "technik.yaml"
-        cfg.write_text("esphome:\n  name: tech\n", encoding="utf-8")
-        (tmp_path / "secrets.yaml").write_text("api_key: test\n", encoding="utf-8")
+        cfg.write_text(
+            "esphome:\n  name: tech\napi:\n  password: !secret api_key\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "secrets.yaml").write_text(
+            "api_key: test\nunused_secret: do-not-send\n", encoding="utf-8"
+        )
 
         fake_conn = FakeConn()
         handler = MagicMock()
@@ -407,6 +412,7 @@ class TestRemoteBuildRegression:
         assert payload["type"] == "spawn"
         assert "yaml" in payload and "esphome:" in payload["yaml"]
         assert "secrets" in payload and "api_key: test" in payload["secrets"]
+        assert "unused_secret" not in payload["secrets"]
         assert "configuration" not in payload
 
     @pytest.mark.asyncio
@@ -443,6 +449,27 @@ class TestRemoteBuildRegression:
         assert storage.esphome_version == const.__version__
         assert storage.firmware_bin_path == firmware_file
         storage.save.assert_called_once()
+
+
+class TestRemoteSecretFiltering:
+    """Tests for reducing secrets payload to only referenced keys."""
+
+    def test_filter_remote_secrets_only_used_keys(self):
+        yaml_content = "api:\n  password: !secret api_key\n"
+        secrets_content = "api_key: test\nunused: nope\n"
+
+        filtered = web_server._filter_remote_secrets(yaml_content, secrets_content)
+
+        assert "api_key: test" in filtered
+        assert "unused" not in filtered
+
+    def test_filter_remote_secrets_no_secret_refs(self):
+        yaml_content = "esphome:\n  name: tech\n"
+        secrets_content = "api_key: test\n"
+
+        filtered = web_server._filter_remote_secrets(yaml_content, secrets_content)
+
+        assert filtered == ""
 
 
 class TestRemoteBuildWorkspaceWrites:

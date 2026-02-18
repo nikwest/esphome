@@ -661,6 +661,35 @@ class EsphomeCompileHandler(EsphomeCommandWebSocket):
 # --- Shared remote build helpers ---
 
 
+_SECRET_REF_RE = re.compile(r"!secret\s+(?:['\"])?([A-Za-z0-9_.-]+)(?:['\"])?")
+
+
+def _filter_remote_secrets(yaml_content: str, secrets_content: str) -> str:
+    """Return a reduced secrets.yaml containing only referenced !secret keys."""
+    if not secrets_content:
+        return ""
+
+    used_keys = set(_SECRET_REF_RE.findall(yaml_content))
+    if not used_keys:
+        return ""
+
+    try:
+        loaded = yaml.safe_load(secrets_content) or {}
+    except yaml.YAMLError:
+        # Keep compatibility if secrets file has unusual formatting.
+        return secrets_content
+
+    if not isinstance(loaded, dict):
+        return ""
+
+    filtered = {key: value for key, value in loaded.items() if key in used_keys}
+    if not filtered:
+        return ""
+
+    dumped = yaml.safe_dump(filtered, sort_keys=False)
+    return dumped if dumped.endswith("\n") else f"{dumped}\n"
+
+
 async def _remote_compile(
     handler: EsphomeCommandWebSocket,
     configuration: str,
@@ -746,6 +775,7 @@ async def _remote_compile(
     if secrets_file.exists():
         try:
             secrets_content = secrets_file.read_text(encoding="utf-8")
+            secrets_content = _filter_remote_secrets(yaml_content, secrets_content)
         except OSError:
             pass
 
